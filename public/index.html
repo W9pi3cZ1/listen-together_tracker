@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>一起听跟踪</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; max-width: 780px;
+         margin: 2rem auto; padding: 0 1rem; background: #111; color: #eee; }
+  h1 { font-size: 1.2rem; }
+  .row { margin: .6rem 0; display: flex; gap: .4rem; align-items: center; }
+  input { flex: 1; padding: .5rem .7rem; font-size: 1rem;
+          background: #222; color: #eee; border: 1px solid #444; border-radius: 6px; }
+  button { padding: .5rem .9rem; font-size: 1rem; background: #ff3a3a;
+           color: #fff; border: none; border-radius: 6px; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.ghost { background: #333; }
+
+  .card { position: relative; background: #1a1a1a; border-radius: 10px;
+          padding: 1rem; margin: .9rem 0; }
+  .idx { position: absolute; top: -.55rem; left: -.55rem;
+         background: #ff3a3a; color: #fff; min-width: 1.5rem; height: 1.5rem;
+         line-height: 1.5rem; text-align: center; border-radius: 999px;
+         font-size: .75rem; font-weight: 700; padding: 0 .35rem;
+         box-shadow: 0 0 0 3px #111; }
+
+  .cover { width: 80px; height: 80px; border-radius: 8px; object-fit: cover;
+           background: #333; float: left; margin-right: 1rem; }
+  .meta { overflow: hidden; }
+  .name { font-size: 1.05rem; font-weight: 600; margin-bottom: .2rem; }
+  .artists { color: #aaa; font-size: .9rem; }
+
+  .bar { height: 6px; background: #333; border-radius: 3px;
+         margin-top: 1rem; overflow: hidden; clear: both; }
+  .bar > div { height: 100%; background: #ff3a3a; width: 0;
+               transition: width .2s linear; }
+  .time { display: flex; justify-content: space-between;
+          font-size: .85rem; color: #888; margin-top: .3rem; }
+
+  .status { font-size: .85rem; color: #888; margin-top: .6rem; }
+
+  .members { display: flex; gap: .5rem; flex-wrap: wrap;
+             margin-top: .7rem; padding-top: .7rem;
+             border-top: 1px solid #262626; }
+  .member { display: flex; align-items: center; gap: .35rem;
+            font-size: .8rem; color: #aaa; background: #202020;
+            border-radius: 999px; padding: .2rem .55rem .2rem .25rem; }
+  .member img { width: 20px; height: 20px; border-radius: 50%;
+                object-fit: cover; background: #333; }
+  .member.inviter { color: #ff9a9a; background: #2a1a1a; }
+  .member.inviter img { box-shadow: 0 0 0 2px #ff3a3a; }
+
+  .hist { font-size: .9rem; color: #ccc; }
+  .hist li { margin: .25rem 0; }
+  .hist .ok { color: #6c6; }
+  .hist .no { color: #c66; }
+
+  .player { margin-top: .7rem; }
+  .player audio { display: none; }
+  .mute-btn, .sync-btn { padding: .35rem .8rem; font-size: .9rem; }
+  .mute-btn.unmuted { background: #2e7d32; }
+
+  details summary { cursor: pointer; color: #888; font-size: .85rem;
+                    margin-top: .5rem; }
+</style>
+</head>
+<body>
+<h1>网易云一起听 · 未登录跟踪 + 播放</h1>
+
+<div class="row">
+  <input id="input" placeholder="粘贴一起听分享链接，或裸 roomId">
+  <button id="add">加入</button>
+</div>
+
+<div id="list"></div>
+
+<script>
+const inputEl = document.getElementById('input');
+const addBtn = document.getElementById('add');
+const listEl = document.getElementById('list');
+
+const views = new Map(); // roomId -> view
+let nextIndex = 1;
+
+function fmt(ms) {
+  if (ms == null || isNaN(ms)) return '--:--';
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[c]);
+}
+
+// ---------- WebSocket ----------
+let ws = null;
+
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  if (location.hostname.includes("xslimenb.eu.org")){
+  const hostname = ws.xslimenb.eu.org;
+  const port = 443;
+  }else{
+  const hostname = location.hostname;
+  const port = 8888;
+  }
+  const url = `${proto}//${hostname}:${port}/ws`;
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    // 重连后重新订阅所有已知房间
+    for (const roomId of views.keys()) {
+      ws.send(JSON.stringify({ type: 'subscribe', roomId }));
+    }
+  };
+
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg?.type === 'snapshot' && msg?.data?.roomId) {
+      const v = views.get(msg.data.roomId);
+      if (v) applySnap(v, msg.data);
+    }
+  };
+
+  ws.onclose = () => {
+    ws = null;
+    setTimeout(connectWS, 1500);
+  };
+
+  ws.onerror = () => { /* onclose 会处理重连 */ };
+}
+
+function wsSubscribe(roomId) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'subscribe', roomId }));
+  }
+  // 否则 onopen 时统一订阅
+}
+
+// ---------- 卡片 ----------
+function createCard(roomId) {
+  const wrap = document.createElement('div');
+  wrap.className = 'card';
+  wrap.innerHTML = `
+    <span class="idx">${nextIndex++}</span>
+    <img class="cover" alt="">
+    <div class="meta">
+      <div class="name">等待第一次轮询…</div>
+      <div class="artists"></div>
+    </div>
+    <div class="bar"><div></div></div>
+    <div class="time"><span class="cur">--:--</span><span class="tot">--:--</span></div>
+    <div class="members"></div>
+    <div class="row player">
+      <button class="mute-btn ghost" title="静音切换">🔇</button>
+      <button class="sync-btn ghost" title="立刻向服务端请求最新状态">⟳ 同步</button>
+      <audio preload="auto" muted></audio>
+    </div>
+    <div class="status"></div>
+    <details>
+      <summary>历史</summary>
+      <ol class="hist"></ol>
+    </details>
+  `;
+  listEl.appendChild(wrap);
+
+  const audio = wrap.querySelector('audio');
+
+  const v = {
+    refs: {
+      root: wrap,
+      cover: wrap.querySelector('.cover'),
+      name: wrap.querySelector('.name'),
+      artists: wrap.querySelector('.artists'),
+      bar: wrap.querySelector('.bar > div'),
+      cur: wrap.querySelector('.cur'),
+      tot: wrap.querySelector('.tot'),
+      status: wrap.querySelector('.status'),
+      hist: wrap.querySelector('.hist'),
+      members: wrap.querySelector('.members'),
+      audio,
+      muteBtn: wrap.querySelector('.mute-btn'),
+      syncBtn: wrap.querySelector('.sync-btn'),
+    },
+    snap: null,
+    baseProgress: 0,
+    baseAt: 0,
+    currentSongId: null,
+    pendingSeekMs: 0,
+    urlCache: new Map(),
+    switching: false,
+  };
+
+  v.refs.muteBtn.onclick = () => {
+    audio.muted = !audio.muted;
+    updateMuteBtn(v);
+    // 用户手势里尝试恢复播放（浏览器只在手势后才能放音）
+    if (audio.paused && audio.src) audio.play().catch(() => {});
+  };
+
+  v.refs.syncBtn.onclick = async () => {
+    v.refs.syncBtn.disabled = true;
+    try {
+      await fetch(`/api/room/${encodeURIComponent(roomId)}/sync`, { method: 'POST' });
+    } catch (_) { /* ignore */ }
+    v.refs.syncBtn.disabled = false;
+  };
+
+  audio.addEventListener('error', () => {
+    // 切歌时我们主动清空 src，会触发 error，这里忽略
+    const s = audio.getAttribute('src');
+    if (!s) return;
+    v.refs.status.textContent = '音频加载失败（可能版权受限）';
+  });
+
+  updateMuteBtn(v);
+  return v;
+}
+
+function updateMuteBtn(v) {
+  const m = v.refs.audio.muted;
+  v.refs.muteBtn.textContent = m ? '🔇' : '🔊';
+  v.refs.muteBtn.classList.toggle('unmuted', !m);
+}
+
+function renderProgress(v) {
+  const audio = v.refs.audio;
+  let prog, dur;
+
+  // 正在切歌时 audio 里还是旧歌，不能信它
+  if (!v.switching && audio.duration && !isNaN(audio.duration)) {
+    prog = audio.currentTime * 1000;
+    dur = audio.duration * 1000;
+  } else if (v.snap?.song) {
+    const delta = v.baseAt ? Date.now() - v.baseAt : 0;
+    prog = Math.min(v.baseProgress + delta, v.snap.song.durationMs);
+    dur = v.snap.song.durationMs;
+  } else {
+    v.refs.bar.style.width = '0%';
+    v.refs.cur.textContent = '--:--';
+    v.refs.tot.textContent = '--:--';
+    return;
+  }
+
+  const pct = dur ? (prog / dur) * 100 : 0;
+  v.refs.bar.style.width = pct.toFixed(1) + '%';
+  v.refs.cur.textContent = fmt(prog);
+  v.refs.tot.textContent = fmt(dur);
+}
+
+async function fetchSongUrl(v, songId) {
+  if (v.urlCache.has(songId)) return v.urlCache.get(songId);
+  const r = await fetch(`/api/song/${songId}/url`);
+  const data = await r.json();
+  const url = data.url || null;
+  if (url) v.urlCache.set(songId, url);
+  if (v.urlCache.size > 50) {
+    const first = v.urlCache.keys().next().value;
+    v.urlCache.delete(first);
+  }
+  return url;
+}
+
+function renderMembers(v, members) {
+  const el = v.refs.members;
+  if (!members || members.length === 0) {
+    el.innerHTML =
+      '<span style="color:#555;font-size:.8rem">等待成员信息…</span>';
+    return;
+  }
+  el.innerHTML = members.map(m => `
+    <span class="member${m.isInviter ? ' inviter' : ''}">
+      <img src="${escapeHtml(m.avatar)}" alt="" referrerpolicy="no-referrer">
+      <span>${escapeHtml(m.nickname)}${m.isInviter ? ' · 房主' : ''}</span>
+    </span>
+  `).join('');
+}
+
+async function syncAudio(v, snap) {
+  if (!snap.song) return;
+  const song = snap.song;
+  const audio = v.refs.audio;
+
+  // ---------- 切歌 ----------
+  if (v.currentSongId !== song.id) {
+    v.currentSongId = song.id;
+    v.pendingSeekMs = snap.progressMs;
+    v.switching = true;
+
+    try { audio.pause(); } catch (_) {}
+    try {
+      audio.removeAttribute('src');
+      audio.load();
+    } catch (_) {}
+
+    try {
+      const url = await fetchSongUrl(v, song.id);
+      if (v.currentSongId !== song.id) return; // await 期间又切歌
+
+      if (!url) {
+        v.switching = false;
+        v.refs.status.textContent = '⚠️ 无法获取播放地址（可能无版权/VIP）';
+        return;
+      }
+
+      audio.src = url;
+      audio.load();
+
+      const onLoaded = () => {
+        audio.removeEventListener('loadedmetadata', onLoaded);
+        if (v.currentSongId !== song.id) return;
+
+        if (v.pendingSeekMs > 0) {
+          try { audio.currentTime = v.pendingSeekMs / 1000; } catch (_) {}
+        }
+        v.switching = false;
+
+        // 静音自动播放（大概率不被拦），用户点🔊即可放音
+        audio.play().catch(() => {
+          v.refs.status.textContent =
+            '自动播放被拦截，点一下页面任意位置（或 🔊）开始';
+        });
+      };
+      audio.addEventListener('loadedmetadata', onLoaded);
+    } catch (e) {
+      v.switching = false;
+      v.refs.status.textContent = '加载失败：' + (e.message || e);
+    }
+    return;
+  }
+
+  // ---------- 同一首歌 ----------
+  if (v.switching) return;
+
+  // 不小心暂停了（例如系统中断），尝试恢复
+  if (audio.paused) {
+    if (audio.src) audio.play().catch(() => {});
+    return;
+  }
+
+  if (!audio.duration || isNaN(audio.duration)) return;
+
+  const serverProgMs = snap.progressMs;
+  const localMs = audio.currentTime * 1000;
+  const diff = serverProgMs - localMs;
+  const threshold = (snap.pollIntervalMs || 8000) * 0.8;
+
+  if (Math.abs(diff) > threshold) {
+    try { audio.currentTime = serverProgMs / 1000; } catch (_) {}
+  }
+}
+
+function applySnap(v, s) {
+  v.snap = s;
+  v.baseProgress = s.progressMs;
+  v.baseAt = Date.now();
+
+  if (s.song) {
+    v.refs.cover.src = s.song.cover || '';
+    v.refs.name.textContent = s.song.name || '(未知)';
+    v.refs.artists.textContent = s.song.artists || '';
+  }
+
+  renderMembers(v, s.members);
+
+  if (s.status === 'dead') {
+    v.refs.status.textContent = '⚠️ 房间已失效，停止跟踪';
+  } else {
+    const last = s.lastUpdatedAt
+      ? new Date(s.lastUpdatedAt).toLocaleTimeString()
+      : '--';
+    v.refs.status.textContent =
+      `跟踪中 · 推送间隔 ${s.pollIntervalMs / 1000}s · 精度约 ±${s.accuracyMs / 1000}s · 上次 ${last}`;
+  }
+
+  v.refs.hist.innerHTML = '';
+  for (const h of s.history.slice().reverse()) {
+    const li = document.createElement('li');
+    const mark = h.complete
+      ? '<span class="ok">✓</span>'
+      : '<span class="no">✗</span>';
+    li.innerHTML =
+      `${mark} ${escapeHtml(h.name)} - ${escapeHtml(h.artists)} (${h.playedSec}s / ${h.durationSec}s)`;
+    v.refs.hist.appendChild(li);
+  }
+
+  syncAudio(v, s);
+  renderProgress(v);
+}
+
+async function add() {
+  const text = inputEl.value.trim();
+  if (!text) return;
+  addBtn.disabled = true;
+  try {
+    const r = await fetch('/api/room', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ input: text }),
+    });
+    const s = await r.json();
+    if (!r.ok) { alert(s.error || '加入失败'); return; }
+    if (!views.has(s.roomId)) {
+      const v = createCard(s.roomId);
+      views.set(s.roomId, v);
+      applySnap(v, s);
+      wsSubscribe(s.roomId);
+    }
+    inputEl.value = '';
+  } finally {
+    addBtn.disabled = false;
+  }
+}
+
+addBtn.onclick = add;
+inputEl.addEventListener('keydown', e => { if (e.key === 'Enter') add(); });
+
+// UI 平滑推进
+setInterval(() => {
+  for (const v of views.values()) renderProgress(v);
+}, 200);
+
+// 恢复已有房间
+fetch('/api/rooms').then(r => r.json()).then(list => {
+  for (const s of list) {
+    if (!views.has(s.roomId)) {
+      const v = createCard(s.roomId);
+      views.set(s.roomId, v);
+      applySnap(v, s);
+      wsSubscribe(s.roomId);
+    }
+  }
+});
+
+connectWS();
+</script>
+</body>
+</html>
