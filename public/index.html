@@ -8,6 +8,12 @@
   body { font-family: system-ui, sans-serif; max-width: 780px;
          margin: 2rem auto; padding: 0 1rem; background: #111; color: #eee; }
   h1 { font-size: 1.2rem; }
+  .badge { display: inline-block; font-size: .7rem; padding: .1rem .5rem;
+           border-radius: 999px; vertical-align: middle; margin-left: .35rem;
+           background: #333; color: #aaa; font-weight: 400; }
+  .badge.on { background: #1b4d20; color: #8ce38c; }
+  .badge.off { background: #4a1a1a; color: #ff9a9a; }
+
   .row { margin: .6rem 0; display: flex; gap: .4rem; align-items: center; }
   input { flex: 1; padding: .5rem .7rem; font-size: 1rem;
           background: #222; color: #eee; border: 1px solid #444; border-radius: 6px; }
@@ -15,6 +21,7 @@
            color: #fff; border: none; border-radius: 6px; cursor: pointer; }
   button:disabled { opacity: .5; cursor: default; }
   button.ghost { background: #333; }
+  button.ghost:hover { background: #3a3a3a; }
 
   .card { position: relative; background: #1a1a1a; border-radius: 10px;
           padding: 1rem; margin: .9rem 0; }
@@ -37,18 +44,22 @@
   .time { display: flex; justify-content: space-between;
           font-size: .85rem; color: #888; margin-top: .3rem; }
 
-  .status { font-size: .85rem; color: #888; margin-top: .6rem; }
+  .status { font-size: .85rem; color: #888; margin-top: .6rem;
+            min-height: 1.2em; }
+  .status.warn { color: #e5a52b; }
 
-  .members { display: flex; gap: .5rem; flex-wrap: wrap;
+  .members { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center;
              margin-top: .7rem; padding-top: .7rem;
              border-top: 1px solid #262626; }
+  .members-hint { width: 100%; font-size: .75rem; color: #555;
+                  margin-bottom: .1rem; }
   .member { display: flex; align-items: center; gap: .35rem;
             font-size: .8rem; color: #aaa; background: #202020;
             border-radius: 999px; padding: .2rem .55rem .2rem .25rem; }
   .member img { width: 20px; height: 20px; border-radius: 50%;
                 object-fit: cover; background: #333; }
-  .member.inviter { color: #ff9a9a; background: #2a1a1a; }
-  .member.inviter img { box-shadow: 0 0 0 2px #ff3a3a; }
+  .member.src { color: #ffb3b3; background: #2a1a1a; }
+  .member.src img { box-shadow: 0 0 0 2px #ff3a3a; }
 
   .hist { font-size: .9rem; color: #ccc; }
   .hist li { margin: .25rem 0; }
@@ -57,15 +68,25 @@
 
   .player { margin-top: .7rem; }
   .player audio { display: none; }
-  .mute-btn, .sync-btn { padding: .35rem .8rem; font-size: .9rem; }
+  .mute-btn, .sync-btn, .share-btn {
+    padding: .35rem .8rem; font-size: .9rem;
+  }
   .mute-btn.unmuted { background: #2e7d32; }
+  .share-btn.copied { background: #2e7d32; }
 
   details summary { cursor: pointer; color: #888; font-size: .85rem;
                     margin-top: .5rem; }
+
+  .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+           background: #2e7d32; color: #fff; padding: .5rem 1rem;
+           border-radius: 6px; font-size: .9rem; opacity: 0;
+           transition: opacity .25s; pointer-events: none; z-index: 9999; }
+  .toast.warn { background: #b45309; }
+  .toast.on { opacity: 1; }
 </style>
 </head>
 <body>
-<h1>网易云一起听 · 未登录跟踪 + 播放</h1>
+<h1>网易云一起听 · 未登录跟踪 + 播放 <span id="auth-badge" class="badge">…</span></h1>
 
 <div class="row">
   <input id="input" placeholder="粘贴一起听分享链接，或裸 roomId">
@@ -73,11 +94,14 @@
 </div>
 
 <div id="list"></div>
+<div class="toast" id="toast"></div>
 
 <script>
 const inputEl = document.getElementById('input');
 const addBtn = document.getElementById('add');
 const listEl = document.getElementById('list');
+const toastEl = document.getElementById('toast');
+const authBadge = document.getElementById('auth-badge');
 
 const views = new Map(); // roomId -> view
 let nextIndex = 1;
@@ -94,6 +118,54 @@ function escapeHtml(s) {
   })[c]);
 }
 
+let toastTimer = null;
+function toast(msg, isWarn = false) {
+  toastEl.textContent = msg;
+  toastEl.classList.toggle('warn', isWarn);
+  toastEl.classList.add('on');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('on'), 1800);
+}
+
+async function copyText(text) {
+  if (!text) return false;
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+// ---------- 登录状态 ----------
+function refreshAuthBadge() {
+  fetch('/api/config').then(r => r.json()).then(cfg => {
+    if (cfg.authed) {
+      authBadge.textContent = '已登录 · 可播放 VIP';
+      authBadge.classList.remove('off');
+      authBadge.classList.add('on');
+    } else {
+      authBadge.textContent = '未登录 · 仅普通音质';
+      authBadge.classList.remove('on');
+      authBadge.classList.add('off');
+    }
+  }).catch(() => {
+    authBadge.textContent = '状态未知';
+  });
+}
+
 // ---------- WebSocket ----------
 let ws = null;
 
@@ -102,17 +174,16 @@ function connectWS() {
   let hostname;
   let port;
   if (location.hostname.includes("xslimenb.eu.org")){
-  hostname = "ws.xslimenb.eu.org";
-  port = 443;
-  }else{
-  hostname = location.hostname;
-  port = 8888;
+    hostname = "ws.xslimenb.eu.org";
+    port = 443;
+  } else {
+    hostname = location.hostname;
+    port = 8888;
   }
   const url = `${proto}//${hostname}:${port}/ws`;
   ws = new WebSocket(url);
 
   ws.onopen = () => {
-    // 重连后重新订阅所有已知房间
     for (const roomId of views.keys()) {
       ws.send(JSON.stringify({ type: 'subscribe', roomId }));
     }
@@ -131,15 +202,40 @@ function connectWS() {
     ws = null;
     setTimeout(connectWS, 1500);
   };
-
-  ws.onerror = () => { /* onclose 会处理重连 */ };
+  ws.onerror = () => {};
 }
 
 function wsSubscribe(roomId) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'subscribe', roomId }));
   }
-  // 否则 onopen 时统一订阅
+}
+
+function wsUnsubscribe(roomId) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'unsubscribe', roomId }));
+  }
+}
+
+// ---------- 列表去重 / 重排 ----------
+function reindex() {
+  let i = 1;
+  for (const v of views.values()) {
+    const el = v.refs.root.querySelector('.idx');
+    if (el) el.textContent = String(i++);
+  }
+  nextIndex = i;
+}
+
+function removeCard(roomId) {
+  const v = views.get(roomId);
+  if (!v) return;
+  try { v.refs.audio.pause(); } catch (_) {}
+  try { v.refs.audio.removeAttribute('src'); v.refs.audio.load(); } catch (_) {}
+  wsUnsubscribe(roomId);
+  v.refs.root.remove();
+  views.delete(roomId);
+  reindex();
 }
 
 // ---------- 卡片 ----------
@@ -159,6 +255,8 @@ function createCard(roomId) {
     <div class="row player">
       <button class="mute-btn ghost" title="静音切换">🔇</button>
       <button class="sync-btn ghost" title="立刻向服务端请求最新状态">⟳ 同步</button>
+      <button class="share-btn ghost" data-share="room" title="复制房间分享链接">🔗 房间链接</button>
+      <button class="share-btn ghost" data-share="song" title="复制当前歌曲链接">🎵 歌曲链接</button>
       <audio preload="auto" muted></audio>
     </div>
     <div class="status"></div>
@@ -186,10 +284,13 @@ function createCard(roomId) {
       audio,
       muteBtn: wrap.querySelector('.mute-btn'),
       syncBtn: wrap.querySelector('.sync-btn'),
+      roomShareBtn: wrap.querySelector('button[data-share="room"]'),
+      songShareBtn: wrap.querySelector('button[data-share="song"]'),
     },
     snap: null,
     baseProgress: 0,
     baseAt: 0,
+    lastRecvAt: 0,
     currentSongId: null,
     pendingSeekMs: 0,
     urlCache: new Map(),
@@ -199,7 +300,6 @@ function createCard(roomId) {
   v.refs.muteBtn.onclick = () => {
     audio.muted = !audio.muted;
     updateMuteBtn(v);
-    // 用户手势里尝试恢复播放（浏览器只在手势后才能放音）
     if (audio.paused && audio.src) audio.play().catch(() => {});
   };
 
@@ -207,15 +307,40 @@ function createCard(roomId) {
     v.refs.syncBtn.disabled = true;
     try {
       await fetch(`/api/room/${encodeURIComponent(roomId)}/sync`, { method: 'POST' });
-    } catch (_) { /* ignore */ }
+    } catch (_) {}
     v.refs.syncBtn.disabled = false;
   };
 
+  v.refs.roomShareBtn.onclick = async () => {
+    const url = v.snap?.shareUrl;
+    if (!url) { toast('暂无房间链接'); return; }
+    const ok = await copyText(url);
+    if (ok) {
+      v.refs.roomShareBtn.classList.add('copied');
+      setTimeout(() => v.refs.roomShareBtn.classList.remove('copied'), 900);
+      toast('房间链接已复制');
+    } else {
+      toast('复制失败，请手动复制', true);
+    }
+  };
+
+  v.refs.songShareBtn.onclick = async () => {
+    const url = v.snap?.song?.shareUrl;
+    if (!url) { toast('当前无歌曲'); return; }
+    const ok = await copyText(url);
+    if (ok) {
+      v.refs.songShareBtn.classList.add('copied');
+      setTimeout(() => v.refs.songShareBtn.classList.remove('copied'), 900);
+      toast('歌曲链接已复制');
+    } else {
+      toast('复制失败，请手动复制', true);
+    }
+  };
+
   audio.addEventListener('error', () => {
-    // 切歌时我们主动清空 src，会触发 error，这里忽略
     const s = audio.getAttribute('src');
     if (!s) return;
-    v.refs.status.textContent = '音频加载失败（可能版权受限）';
+    v.refs.status.classList.add('warn');
   });
 
   updateMuteBtn(v);
@@ -232,7 +357,6 @@ function renderProgress(v) {
   const audio = v.refs.audio;
   let prog, dur;
 
-  // 正在切歌时 audio 里还是旧歌，不能信它
   if (!v.switching && audio.duration && !isNaN(audio.duration)) {
     prog = audio.currentTime * 1000;
     dur = audio.duration * 1000;
@@ -273,12 +397,14 @@ function renderMembers(v, members) {
       '<span style="color:#555;font-size:.8rem">等待成员信息…</span>';
     return;
   }
-  el.innerHTML = members.map(m => `
-    <span class="member${m.isInviter ? ' inviter' : ''}">
-      <img src="${escapeHtml(m.avatar)}" alt="" referrerpolicy="no-referrer">
-      <span>${escapeHtml(m.nickname)}${m.isInviter ? ' · 房主' : ''}</span>
-    </span>
-  `).join('');
+  el.innerHTML =
+    `<div class="members-hint">当前可见成员（网易云最多返回 4 位其他人；「分享来源」仅为链接发起者，不代表房主）</div>` +
+    members.map(m => `
+      <span class="member${m.isInviter ? ' src' : ''}">
+        <img src="${escapeHtml(m.avatar)}" alt="" referrerpolicy="no-referrer">
+        <span>${escapeHtml(m.nickname)}${m.isInviter ? ' · 分享来源' : ''}</span>
+      </span>
+    `).join('');
 }
 
 async function syncAudio(v, snap) {
@@ -286,7 +412,6 @@ async function syncAudio(v, snap) {
   const song = snap.song;
   const audio = v.refs.audio;
 
-  // ---------- 切歌 ----------
   if (v.currentSongId !== song.id) {
     v.currentSongId = song.id;
     v.pendingSeekMs = snap.progressMs;
@@ -300,11 +425,12 @@ async function syncAudio(v, snap) {
 
     try {
       const url = await fetchSongUrl(v, song.id);
-      if (v.currentSongId !== song.id) return; // await 期间又切歌
+      if (v.currentSongId !== song.id) return;
 
       if (!url) {
         v.switching = false;
-        v.refs.status.textContent = '⚠️ 无法获取播放地址（可能无版权/VIP）';
+        v.refs.status.textContent = '⚠️ 无法获取播放地址（可能无版权/VIP，可在服务端设置 MUSIC_U）';
+        v.refs.status.classList.add('warn');
         return;
       }
 
@@ -319,36 +445,29 @@ async function syncAudio(v, snap) {
           try { audio.currentTime = v.pendingSeekMs / 1000; } catch (_) {}
         }
         v.switching = false;
-
-        // 静音自动播放（大概率不被拦），用户点🔊即可放音
-        audio.play().catch(() => {
-          v.refs.status.textContent =
-            '自动播放被拦截，点一下页面任意位置（或 🔊）开始';
-        });
+        audio.play().catch(() => {});
       };
       audio.addEventListener('loadedmetadata', onLoaded);
     } catch (e) {
       v.switching = false;
       v.refs.status.textContent = '加载失败：' + (e.message || e);
+      v.refs.status.classList.add('warn');
     }
     return;
   }
 
-  // ---------- 同一首歌 ----------
   if (v.switching) return;
 
-  // 不小心暂停了（例如系统中断），尝试恢复
   if (audio.paused) {
     if (audio.src) audio.play().catch(() => {});
     return;
   }
-
   if (!audio.duration || isNaN(audio.duration)) return;
 
   const serverProgMs = snap.progressMs;
   const localMs = audio.currentTime * 1000;
   const diff = serverProgMs - localMs;
-  const threshold = (snap.pollIntervalMs || 4000) * 0.8;
+  const threshold = (snap.pollIntervalMs || 8000) * 0.8;
 
   if (Math.abs(diff) > threshold) {
     try { audio.currentTime = serverProgMs / 1000; } catch (_) {}
@@ -356,9 +475,20 @@ async function syncAudio(v, snap) {
 }
 
 function applySnap(v, s) {
+  // 房间失效 / 未跟踪：直接从列表移除
+  if (s.status === 'dead' || s.status === 'closed' ||
+      s.status === 'not-tracking' || s.deadAt) {
+    const reason = s.deadReason
+      || (s.status === 'not-tracking' ? '服务端未跟踪' : '房间已过期');
+    toast(`房间已失效：${reason}`, true);
+    removeCard(s.roomId);
+    return;
+  }
+
   v.snap = s;
   v.baseProgress = s.progressMs;
   v.baseAt = Date.now();
+  v.lastRecvAt = Date.now();
 
   if (s.song) {
     v.refs.cover.src = s.song.cover || '';
@@ -367,19 +497,15 @@ function applySnap(v, s) {
   }
 
   renderMembers(v, s.members);
+  renderHistory(v, s.history);
+  syncAudio(v, s);
+  renderProgress(v);
+  refreshStatus(v);
+}
 
-  if (s.status === 'dead') {
-    v.refs.status.textContent = '⚠️ 房间已失效，停止跟踪';
-  } else {
-    const last = s.lastUpdatedAt
-      ? new Date(s.lastUpdatedAt).toLocaleTimeString()
-      : '--';
-    v.refs.status.textContent =
-      `跟踪中 · 推送间隔 ${s.pollIntervalMs / 1000}s · 精度约 ±${s.accuracyMs / 1000}s · 上次 ${last}`;
-  }
-
+function renderHistory(v, history) {
   v.refs.hist.innerHTML = '';
-  for (const h of s.history.slice().reverse()) {
+  for (const h of (history || []).slice().reverse()) {
     const li = document.createElement('li');
     const mark = h.complete
       ? '<span class="ok">✓</span>'
@@ -388,9 +514,33 @@ function applySnap(v, s) {
       `${mark} ${escapeHtml(h.name)} - ${escapeHtml(h.artists)} (${h.playedSec}s / ${h.durationSec}s)`;
     v.refs.hist.appendChild(li);
   }
+}
 
-  syncAudio(v, s);
-  renderProgress(v);
+function refreshStatus(v) {
+  const now = Date.now();
+  const el = v.refs.status;
+
+  if (!v.snap || !v.lastRecvAt) {
+    el.textContent = '等待第一次推送…';
+    el.classList.remove('warn');
+    return;
+  }
+
+  const age = now - v.lastRecvAt;
+  const base = v.snap.pollIntervalMs || 8000;
+
+  if (age > base * 3) {
+    el.textContent = `⚠️ 长时间未收到更新（${Math.round(age / 1000)}s），可能服务端未跟踪或网络中断`;
+    el.classList.add('warn');
+    return;
+  }
+
+  const last = v.snap.lastUpdatedAt
+    ? new Date(v.snap.lastUpdatedAt).toLocaleTimeString()
+    : '--';
+  el.textContent =
+    `跟踪中 · 推送间隔 ${v.snap.pollIntervalMs / 1000}s · 精度约 ±${v.snap.accuracyMs / 1000}s · 上次 ${last}`;
+  el.classList.remove('warn');
 }
 
 async function add() {
@@ -405,12 +555,17 @@ async function add() {
     });
     const s = await r.json();
     if (!r.ok) { alert(s.error || '加入失败'); return; }
-    if (!views.has(s.roomId)) {
-      const v = createCard(s.roomId);
-      views.set(s.roomId, v);
-      applySnap(v, s);
-      wsSubscribe(s.roomId);
+
+    if (views.has(s.roomId)) {
+      toast('该房间已在列表中');
+      inputEl.value = '';
+      return;
     }
+
+    const v = createCard(s.roomId);
+    views.set(s.roomId, v);
+    applySnap(v, s);
+    wsSubscribe(s.roomId);
     inputEl.value = '';
   } finally {
     addBtn.disabled = false;
@@ -425,17 +580,26 @@ setInterval(() => {
   for (const v of views.values()) renderProgress(v);
 }, 200);
 
+// 状态栏统一刷新
+setInterval(() => {
+  for (const v of views.values()) refreshStatus(v);
+}, 500);
+
 // 恢复已有房间
 fetch('/api/rooms').then(r => r.json()).then(list => {
   for (const s of list) {
-    if (!views.has(s.roomId)) {
-      const v = createCard(s.roomId);
-      views.set(s.roomId, v);
-      applySnap(v, s);
-      wsSubscribe(s.roomId);
-    }
+    if (views.has(s.roomId)) continue;
+    if (s.status === 'dead' || s.deadAt) continue;
+    const v = createCard(s.roomId);
+    views.set(s.roomId, v);
+    applySnap(v, s);
+    wsSubscribe(s.roomId);
   }
 });
+
+// 初次检查登录状态，并每 30s 刷新一次
+refreshAuthBadge();
+setInterval(refreshAuthBadge, 30_000);
 
 connectWS();
 </script>
