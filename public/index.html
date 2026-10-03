@@ -346,7 +346,7 @@ async function syncAudio(v, snap) {
   const serverProgMs = snap.progressMs;
   const localMs = audio.currentTime * 1000;
   const diff = serverProgMs - localMs;
-  const threshold = (snap.pollIntervalMs || 8000) * 0.8;
+  const threshold = (snap.pollIntervalMs || 4000) * 0.8;
 
   if (Math.abs(diff) > threshold) {
     try { audio.currentTime = serverProgMs / 1000; } catch (_) {}

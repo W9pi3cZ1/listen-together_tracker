@@ -3,7 +3,7 @@
 
 const PORT = Number(Deno.env.get("PORT") ?? 8000);
 const WS_PORT = Number(Deno.env.get("WS_PORT") ?? 8888);
-const POLL_MS = Number(Deno.env.get("POLL_MS") ?? 8000);
+const POLL_MS = Number(Deno.env.get("POLL_MS") ?? 4000);
 const DEAD_THRESHOLD = 3;        // 连续 N 次失败判房间死亡
 const CLEANUP_AFTER_MS = 5 * 60 * 1000;  // 死亡后多久清理
 
