@@ -100,7 +100,7 @@ let ws = null;
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   if (location.hostname.includes("xslimenb.eu.org")){
-  const hostname = ws.xslimenb.eu.org;
+  const hostname = "ws.xslimenb.eu.org";
   const port = 443;
   }else{
   const hostname = location.hostname;
