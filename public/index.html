@@ -99,12 +99,14 @@ let ws = null;
 
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  let hostname;
+  let port;
   if (location.hostname.includes("xslimenb.eu.org")){
-  const hostname = "ws.xslimenb.eu.org";
-  const port = 443;
+  hostname = "ws.xslimenb.eu.org";
+  port = 443;
   }else{
-  const hostname = location.hostname;
-  const port = 8888;
+  hostname = location.hostname;
+  port = 8888;
   }
   const url = `${proto}//${hostname}:${port}/ws`;
   ws = new WebSocket(url);
