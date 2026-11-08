@@ -2,11 +2,15 @@
 // 启动: deno task start
 // 登录：MUSIC_U=xxx deno task start
 //   或  COOKIE="MUSIC_U=xxx; __csrf=yyy" deno task start
+//   或  COOKIE_FILE=./Cookies.TXT deno task start   （自动监控文件变化）
+// deno-lint-ignore-file no-explicit-any
 
 const PORT = Number(Deno.env.get("PORT") ?? 8000);
 const WS_PORT = Number(Deno.env.get("WS_PORT") ?? 8888);
 const POLL_MS = Number(Deno.env.get("POLL_MS") ?? 4000);
 const SONG_BR = Number(Deno.env.get("SONG_BR") ?? 320000);   // 音质：320000 / 999000(无损)
+const COOKIE_FILE = (Deno.env.get("COOKIE_FILE") ?? "").trim();
+const COOKIE_WATCH_MS = Number(Deno.env.get("COOKIE_WATCH_MS") ?? 2000);
 const DEAD_THRESHOLD = 3;
 const HEARTBEAT_TIMEOUT_MS = POLL_MS * 6;
 const CLEANUP_AFTER_MS = 5 * 60 * 1000;
@@ -20,12 +24,75 @@ function composeCookieFromMusicU(musicU: string): string {
   return `MUSIC_U=${musicU}; ${DEFAULT_BASE_COOKIE}`;
 }
 
-// 优先级：COOKIE 环境变量 > MUSIC_U 环境变量 > 匿名 cookie
+// 解析 Cookies 文件，兼容两种格式：
+//   1. Netscape cookies.txt（浏览器插件导出，tab 分隔 7 列）
+//   2. 普通 "k1=v1; k2=v2" 文本
+function parseCookieFile(rawText: string): string {
+  const text = rawText.replace(/^\uFEFF/, ""); // 去 BOM
+
+  const isNetscapeLine = (raw: string): boolean => {
+    let l = raw;
+    if (l.startsWith("#HttpOnly_")) l = l.slice("#HttpOnly_".length);
+    else if (l.startsWith("#")) return false;
+    return l.split("\t").length >= 7;
+  };
+
+  const lines = text.split(/\r?\n/);
+  const looksNetscape = lines.some(isNetscapeLine);
+  if (!looksNetscape) {
+    return text.trim();
+  }
+
+  const pairs: string[] = [];
+  for (const raw of lines) {
+    let l = raw;
+    if (l.startsWith("#HttpOnly_")) l = l.slice("#HttpOnly_".length);
+    else if (l.startsWith("#")) continue;
+    if (!l.trim()) continue;
+    const parts = l.split("\t");
+    if (parts.length < 7) continue;
+    const name = parts[5].trim();
+    const value = parts[6];
+    if (name && value) pairs.push(`${name}=${value}`);
+  }
+  return pairs.join("; ");
+}
+
+function loadCookieFromFile(): string | null {
+  if (!COOKIE_FILE) return null;
+  try {
+    const raw = Deno.readTextFileSync(COOKIE_FILE);
+    const parsed = parseCookieFile(raw);
+    if (!parsed) {
+      console.warn(`[cookie] 文件 ${COOKIE_FILE} 为空或无法解析`);
+      return null;
+    }
+    return parsed;
+  } catch (e) {
+    console.error(`[cookie] 读取 ${COOKIE_FILE} 失败: ${(e as Error).message}`);
+    return null;
+  }
+}
+
+let cookieSource = "anonymous";
 let COOKIE: string = (() => {
   const raw = Deno.env.get("COOKIE");
-  if (raw && raw.trim()) return raw.trim();
+  if (raw && raw.trim()) {
+    cookieSource = "env:COOKIE";
+    return raw.trim();
+  }
+  if (COOKIE_FILE) {
+    const fromFile = loadCookieFromFile();
+    if (fromFile) {
+      cookieSource = `file:${COOKIE_FILE}`;
+      return fromFile;
+    }
+  }
   const mu = Deno.env.get("MUSIC_U");
-  if (mu && mu.trim()) return composeCookieFromMusicU(mu.trim());
+  if (mu && mu.trim()) {
+    cookieSource = "env:MUSIC_U";
+    return composeCookieFromMusicU(mu.trim());
+  }
   return DEFAULT_BASE_COOKIE;
 })();
 
@@ -37,12 +104,62 @@ function isAuthed(): boolean {
 function setAuth(opts: { musicU?: string; cookie?: string }) {
   if (typeof opts.cookie === "string" && opts.cookie.trim()) {
     COOKIE = opts.cookie.trim();
+    cookieSource = "api:cookie";
     return;
   }
   if (typeof opts.musicU === "string") {
     COOKIE = composeCookieFromMusicU(opts.musicU.trim());
+    cookieSource = "api:musicU";
   }
 }
+
+// 监控 Cookies 文件，变化时自动重新加载
+function startCookieWatcher() {
+  if (!COOKIE_FILE) return;
+
+  let lastMtime = -1;
+  let lastSize = -1;
+  try {
+    const st = Deno.statSync(COOKIE_FILE);
+    lastMtime = st.mtime?.getTime() ?? 0;
+    lastSize = st.size;
+  } catch {
+    console.warn(`[cookie] 启动时文件不存在：${COOKIE_FILE}（后续创建后会自动加载）`);
+  }
+
+  console.log(
+    `[cookie] 已启用文件监控：${COOKIE_FILE}（每 ${COOKIE_WATCH_MS}ms 检查一次）`,
+  );
+
+  setInterval(() => {
+    try {
+      const st = Deno.statSync(COOKIE_FILE);
+      const mtime = st.mtime?.getTime() ?? 0;
+      const size = st.size;
+      if (mtime === lastMtime && size === lastSize) return;
+      lastMtime = mtime;
+      lastSize = size;
+
+      const raw = Deno.readTextFileSync(COOKIE_FILE);
+      const parsed = parseCookieFile(raw);
+      if (!parsed) {
+        console.warn(`[cookie] ${COOKIE_FILE} 内容为空或无效，已忽略本次更新`);
+        return;
+      }
+      const before = isAuthed();
+      COOKIE = parsed;
+      cookieSource = `file:${COOKIE_FILE}`;
+      const after = isAuthed();
+      console.log(
+        `[cookie] 已从 ${COOKIE_FILE} 重新加载（${before ? "已登录" : "未登录"} → ${after ? "已登录" : "未登录"}）`,
+      );
+    } catch {
+      // 文件不存在/正在写入，忽略本次
+    }
+  }, COOKIE_WATCH_MS);
+}
+
+startCookieWatcher();
 
 // ---------- weapi 加密 ----------
 const AES_KEY = new TextEncoder().encode("0CoJUm6Qyw8W8jud");
@@ -57,12 +174,26 @@ const PUB_N = BigInt("0x" +
 
 const b64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
 
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const ab = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(ab).set(bytes);
+  return ab;
+}
+
 async function aesEncrypt(text: string, key: Uint8Array): Promise<string> {
   const keyObj = await crypto.subtle.importKey(
-    "raw", key, { name: "AES-CBC" }, false, ["encrypt"],
+    "raw",
+    toArrayBuffer(key),
+    { name: "AES-CBC" },
+    false,
+    ["encrypt"],
   );
   const data = new TextEncoder().encode(text);
-  const ct = await crypto.subtle.encrypt({ name: "AES-CBC", iv: IV }, keyObj, data);
+  const ct = await crypto.subtle.encrypt(
+    { name: "AES-CBC", iv: toArrayBuffer(IV) },
+    keyObj,
+    toArrayBuffer(data),
+  );
   return b64(new Uint8Array(ct));
 }
 
@@ -553,6 +684,8 @@ Deno.serve({ port: PORT }, async (req) => {
     return json({
       authed: isAuthed(),
       br: SONG_BR,
+      cookieSource,
+      cookieFile: COOKIE_FILE || null,
     });
   }
 
@@ -567,9 +700,9 @@ Deno.serve({ port: PORT }, async (req) => {
     });
     const after = isAuthed();
     console.log(
-      `[auth] 更新登录凭据: ${before ? "已登录" : "未登录"} → ${after ? "已登录" : "未登录"}`,
+      `[auth] 更新登录凭据: ${before ? "已登录" : "未登录"} → ${after ? "已登录" : "未登录"}（来源：${cookieSource}）`,
     );
-    return json({ ok: true, authed: after, br: SONG_BR });
+    return json({ ok: true, authed: after, br: SONG_BR, cookieSource });
   }
 
   if (url.pathname === "/api/room" && req.method === "POST") {
@@ -643,8 +776,11 @@ console.log(`🔌 WebSocket 推送: ws://localhost:${WS_PORT}/ws`);
 console.log(`   轮询间隔: ${POLL_MS}ms  (精度约 ±${POLL_MS}ms)`);
 console.log(`   请求音质: ${SONG_BR} bps`);
 console.log(
-  `🔑 登录状态: ${isAuthed() ? "已登录（可播放 VIP）" : "未登录（仅普通音质）"}`,
+  `🔑 登录状态: ${isAuthed() ? "已登录（可播放 VIP）" : "未登录（仅普通音质）"}（来源：${cookieSource}）`,
 );
+if (COOKIE_FILE) {
+  console.log(`📄 Cookies 文件监控已开启: ${COOKIE_FILE}（保存后自动重新加载）`);
+}
 console.log(
-  `   （可用 POST /api/config 动态设置；或 MUSIC_U=xxx / COOKIE=... 环境变量启动）`,
+  `   （可用 POST /api/config 动态设置；或 MUSIC_U=xxx / COOKIE=... / COOKIE_FILE=... 环境变量启动）`,
 );
